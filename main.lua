@@ -1,49 +1,48 @@
-local ffi = require("ffi")
+io.stdout:setvbuf('no')
+package.path = './?.lua;' .. package.path
 
--- GLFW bindings (minimal subset)
-ffi.cdef[[
-typedef struct GLFWwindow GLFWwindow;
+local loader = require("bin.loader")
+local libs = loader.init()
+_G.libs = libs
 
-int glfwInit(void);
-void glfwTerminate(void);
+local audio_parser = require("util.audio_parser")
 
-GLFWwindow* glfwCreateWindow(int width, int height, const char* title, void* monitor, void* share);
-void glfwMakeContextCurrent(GLFWwindow* window);
-
-int glfwWindowShouldClose(GLFWwindow* window);
-void glfwSwapBuffers(GLFWwindow* window);
-void glfwPollEvents(void);
-
-double glfwGetTime(void);
-]]
-
-local glfw = ffi.load("glfw")
-
--- OpenGL (minimal)
-ffi.cdef[[
-void glClearColor(float r, float g, float b, float a);
-void glClear(unsigned int mask);
-]]
-
-local gl = ffi.load("GL")
-
-local GL_COLOR_BUFFER_BIT = 0x00004000
-
--- init
-assert(glfw.glfwInit() == 1, "GLFW init failed")
-
-local window = glfw.glfwCreateWindow(800, 600, "SUNBURN", nil, nil)
-assert(window ~= nil, "Window creation failed")
-
-glfw.glfwMakeContextCurrent(window)
-
--- main loop
-while glfw.glfwWindowShouldClose(window) == 0 do
-    gl.glClearColor(0.1, 0.2, 0.3, 1.0)
-    gl.glClear(GL_COLOR_BUFFER_BIT)
-
-    glfw.glfwSwapBuffers(window)
-    glfw.glfwPollEvents()
+print("Parsing audio files...")
+os.execute("mkdir -p temps && rm -f temps/*.burn")
+local wav = audio_parser.load_wav("assets/sounds/meow.wav")
+if wav then
+    local ok, err = audio_parser.save_burn(wav, "temps/meow.burn")
+    if ok then
+        local f = io.open("temps/meow.burn", "rb")
+        local sz = f:seek("end")
+        f:close()
+        print("  Parsed: meow.wav -> meow.burn (" .. sz .. " bytes)")
+    else
+        print("  Error: " .. tostring(err))
+    end
+else
+    print("  Error loading WAV")
 end
 
-glfw.glfwTerminate()
+local win_sys = require("util.window")
+local engine = require("util.engine")
+local scene = require("scenes.init")
+
+local my_win = win_sys.create(800, 600, "SUNBURN ENGINE")
+local my_audio = _G.audio_impl.init()
+
+engine.init(scene)
+
+while not win_sys.should_close(my_win) do
+    engine.update()
+    engine.step()
+    win_sys.swap(my_win)
+end
+
+print("Cleaning up temps...")
+os.execute("rm -rf temps/*")
+
+if my_audio then
+    _G.audio_impl.destroy(my_audio)
+end
+win_sys.destroy(my_win)
