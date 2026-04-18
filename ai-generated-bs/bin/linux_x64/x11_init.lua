@@ -6,7 +6,6 @@ ffi.cdef[[
     typedef unsigned long Window;
     typedef void* Visual;
     typedef void* GLXContext;
-    typedef unsigned long Font;
 
     typedef struct {
         int type;
@@ -36,10 +35,26 @@ ffi.cdef[[
         int bits_per_rgb;
     } XVisualInfo;
 
+    /* stb_truetype */
     typedef struct {
-        long tv_sec;
-        long tv_usec;
-    } timeval;
+        float x0, y0, x1, y1;
+        float u0, v0, u1, v1;
+    } stbtt_bakedchar;
+
+    typedef struct {
+        float x0, y0, x1, y1;
+        float s0, t0, s1, t1;
+    } stbtt_aligned_quad;
+
+    int stbtt_BakeFontBitmap(const unsigned char *data, int offset, float em_to_pixels, unsigned char *pixels, int pw, int ph, int first_char, int num_chars, stbtt_bakedchar *chardata);
+    void stbtt_GetBakedQuad(const stbtt_bakedchar *chardata, int pw, int ph, int char_index, float *xpos, float *ypos, stbtt_aligned_quad *q, int align_to_integer);
+
+    /* OpenGL (minimal needed) */
+    void glGenTextures(int, unsigned int*);
+    void glBindTexture(unsigned int, unsigned int);
+    void glTexImage2D(unsigned int, int, int, int, int, int, unsigned int, unsigned int, const void*);
+    void glTexParameteri(unsigned int, unsigned int, int);
+    void* glXGetProcAddress(const char*);
 
     Display* XOpenDisplay(const char*);
     Window XDefaultRootWindow(Display*);
@@ -58,14 +73,25 @@ ffi.cdef[[
     void glXSwapBuffers(Display*, Window);
     void XDestroyWindow(Display*, Window);
     void XCloseDisplay(Display*);
-    Font XLoadFont(Display*, const char*);
-    void glXUseXFont(Font, int, int, int);
-    void* glXGetProcAddress(const char* name);
+
+    void glClearColor(float, float, float, float);
+    void glClear(int);
+    void glLoadIdentity();
+    void glEnable(int cap);
+    void glDisable(int cap);
+    void glBlendFunc(int sfactor, int dfactor);
+    void glColor3f(float, float, float);
+    void glListBase(uint32_t base);
+    void glCallLists(int n, int type, const char* s);
+    void glRasterPos2f(float, float);
+    void glBegin(int);
+    void glEnd();
+    void glVertex3f(float, float, float);
+    void glTexCoord2f(float, float);
 
     typedef void (*PFNGLXSWAPINTERVALEXTPROC)(Display*, Window, int);
 
-    int gettimeofday(timeval* t, void* tzp);
-
+    /* OpenAL */
     typedef struct ALCdevice_struct ALCdevice;
     typedef struct ALCcontext_struct ALCcontext;
 
@@ -79,22 +105,13 @@ ffi.cdef[[
     void alGenBuffers(int, uint32_t*);
     void alBufferData(uint32_t, int, const void*, int, int);
     void alSourcei(uint32_t, int, int);
+    void alSourcef(uint32_t, int, float);
     void alSourcePlay(uint32_t);
     int alGetError();
     void alDeleteBuffers(int, uint32_t*);
-
-    void glClearColor(float, float, float, float);
-    void glClear(int);
-    void glRasterPos2f(float, float);
-    void glListBase(uint32_t);
-    void glCallLists(int, int, const char*);
-    void glColor3f(float, float, float);
-    void glLoadIdentity();
-    void glBegin(int);
-    void glEnd();
-    void glVertex3f(float, float, float);
 ]]
 
+-- OpenAL constants
 local AL_FORMAT_MONO8    = 0x1100
 local AL_FORMAT_MONO16   = 0x1101
 local AL_FORMAT_STEREO8  = 0x1102
@@ -102,7 +119,100 @@ local AL_FORMAT_STEREO16 = 0x1103
 local AL_GAIN            = 0x100A
 local AL_BUFFER          = 0x1009
 
+-- OpenGL constants
+local GL_TEXTURE_2D = 0x0DE1
+local GL_RGB = 0x1907
+local GL_RGBA = 0x1908
+local GL_UNSIGNED_BYTE = 0x1401
+local GL_LINEAR = 0x2601
+local GL_TEXTURE_MIN_FILTER = 0x2801
+local GL_TEXTURE_MAG_FILTER = 0x2800
+
+local function load_file(path)
+    local f = io.open(path, "rb")
+    local d = f:read("*all")
+    f:close()
+    return ffi.new("unsigned char[?]", #d, d), #d
+end
+
+local function create_font(path)
+    local ttf, size = load_file(path)
+
+    if not ttf or size == 0 then
+        return nil
+    end
+
+    local W, H = 512, 512
+    local bitmap = ffi.new("unsigned char[?]", W * H)
+    local cdata = ffi.new("stbtt_bakedchar[96]")
+
+    if not libs.stb then
+        return nil
+    end
+
+    local px = 24.0
+    local result = libs.stb.stbtt_BakeFontBitmap(
+        ttf, 0,
+        px,
+        bitmap,
+        W, H,
+        32, 96,
+        cdata
+    )
+
+    local rgba = ffi.new("unsigned char[?]", W * H * 4)
+    for i = 0, W * H - 1 do
+        local v = bitmap[i]
+        rgba[i * 4] = 255
+        rgba[i * 4 + 1] = 255
+        rgba[i * 4 + 2] = 255
+        rgba[i * 4 + 3] = v
+    end
+
+    local tex = ffi.new("unsigned int[1]")
+    libs.gl.glGenTextures(1, tex)
+    libs.gl.glBindTexture(GL_TEXTURE_2D, tex[0])
+
+    libs.gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+        W, H, 0,
+        GL_RGBA, GL_UNSIGNED_BYTE,
+        rgba
+    )
+
+    libs.gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+    libs.gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+
+    return {
+        tex = tex[0],
+        cdata = cdata,
+        w = W,
+        h = H,
+        px = px
+    }
+end
+
+local function draw_text(font, px, py, text)
+    local gl = libs.gl
+    gl.glEnable(GL_TEXTURE_2D)
+    gl.glColor3f(1, 1, 1)
+    gl.glBindTexture(GL_TEXTURE_2D, font.tex)
+
+    gl.glBegin(7)
+    gl.glTexCoord2f(0, 0)
+    gl.glVertex3f(-0.5, -0.8, 0)
+    gl.glTexCoord2f(1, 0)
+    gl.glVertex3f(0.5, -0.8, 0)
+    gl.glTexCoord2f(1, 1)
+    gl.glVertex3f(0.5, -0.5, 0)
+    gl.glTexCoord2f(0, 1)
+    gl.glVertex3f(-0.5, -0.5, 0)
+    gl.glEnd()
+
+    gl.glDisable(GL_TEXTURE_2D)
+end
+
 _G.window_impl = {
+    draw_text = draw_text,
     create = function(w, h, title)
         local dpy = libs.x11.XOpenDisplay(nil)
         local root = libs.x11.XDefaultRootWindow(dpy)
@@ -122,14 +232,20 @@ _G.window_impl = {
         local ctx = libs.gl.glXCreateContext(dpy, vis, nil, 1)
         libs.gl.glXMakeCurrent(dpy, win, ctx)
 
-        local swp_ptr = libs.gl.glXGetProcAddress("glXSwapIntervalEXT")
+        local swp_ptr = libs.glx.glXGetProcAddress("glXSwapIntervalEXT")
         if swp_ptr ~= nil then
             ffi.cast("PFNGLXSWAPINTERVALEXTPROC", swp_ptr)(dpy, win, 0)
         end
 
-        libs.gl.glXUseXFont(libs.x11.XLoadFont(dpy, "9x15"), 32, 96, 1000)
+        local font = create_font("/home/frontline/SUNBURN/assets/fonts/font.ttf")
 
-        return { dpy = dpy, win = win, wm_delete = wm_delete, ctx = ctx }
+        _G._window = {
+            dpy = dpy,
+            win = win,
+            ctx = ctx,
+            font = font
+        }
+        return _G._window
     end,
 
     should_close = function(obj)
@@ -138,19 +254,15 @@ _G.window_impl = {
 
         while libs.x11.XPending(obj.dpy) > 0 do
             libs.x11.XNextEvent(obj.dpy, ev)
-            local ev_type = ev.type
-
-            if ev_type == 33 then
-                return true
-            elseif ev_type == 17 then
+            if ev.type == 33 or ev.type == 17 then
                 return true
             end
         end
-
         return false
     end,
 
     swap = function(obj)
+        libs.gl.glXMakeCurrent(obj.dpy, obj.win, obj.ctx)
         libs.gl.glXSwapBuffers(obj.dpy, obj.win)
     end,
 
@@ -161,6 +273,10 @@ _G.window_impl = {
         libs.x11.XCloseDisplay(obj.dpy)
     end
 }
+
+---------------------------------------------------
+-- AUDIO
+---------------------------------------------------
 
 _G.audio_impl = {
     init = function()
@@ -176,10 +292,7 @@ _G.audio_impl = {
     create_source = function()
         local src = ffi.new("uint32_t[1]")
         libs.al.alGenSources(1, src)
-
-        -- ensure gain is safe
         libs.al.alSourcef(src[0], AL_GAIN, 1.0)
-
         return src[0]
     end,
 
@@ -216,5 +329,6 @@ _G.audio_impl = {
 
 return {
     window_impl = _G.window_impl,
-    audio_impl = _G.audio_impl
+    audio_impl = _G.audio_impl,
+    draw_text = draw_text
 }

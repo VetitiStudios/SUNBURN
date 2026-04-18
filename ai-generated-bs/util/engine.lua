@@ -1,6 +1,12 @@
 local ffi = require("ffi")
+ffi.cdef[[
+struct timeval {
+    long tv_sec;
+    long tv_usec;
+};
+]]
 local engine = {}
-local tv = ffi.new("timeval")
+local tv = ffi.new("struct timeval")
 
 local function get_time()
     if pcall(function() return ffi.C.gettimeofday end) then
